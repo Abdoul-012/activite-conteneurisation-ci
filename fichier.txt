@@ -1,0 +1,2 @@
+https://hub.docker.com/r/stene/fastapi-activity
+https://github.com/Abdoul-012/activite-conteneurisation-ci
