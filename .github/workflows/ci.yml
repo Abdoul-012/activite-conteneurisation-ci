@@ -1,4 +1,4 @@
-name: CI API Python
+name: CI Fullstack Activité 3
 
 on:
   push:
@@ -7,69 +7,102 @@ on:
     branches: ["main"]
 
 jobs:
-  integration-api:
+  e2e-fullstack:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Préparer les secrets Docker
+        run: |
+          mkdir -p secrets
+          printf '%s' '${{ secrets.MYSQL_ROOT_PASSWORD }}' > secrets/mysql_root_password.txt
+          printf '%s' '${{ secrets.MYSQL_DB }}' > secrets/mysql_database.txt
+          printf '%s' '${{ secrets.MYSQL_USER }}' > secrets/mysql_user.txt
+          printf '%s' '${{ secrets.MYSQL_PASSWORD }}' > secrets/mysql_password.txt
+
+      - name: Démarrer la stack complète
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: docker compose up -d --build
+
+      - name: Vérifier l'état des containers
+        run: |
+          for i in {1..24}; do
+            echo "Tentative $i"
+            docker compose ps
+
+            db_status=$(docker inspect -f '{{.State.Health.Status}}' $(docker compose ps -q db))
+            api_status=$(docker inspect -f '{{.State.Health.Status}}' $(docker compose ps -q api))
+            react_status=$(docker inspect -f '{{.State.Health.Status}}' $(docker compose ps -q react))
+            adminer_status=$(docker inspect -f '{{.State.Health.Status}}' $(docker compose ps -q adminer))
+
+            if [ "$db_status" = "healthy" ] && [ "$api_status" = "healthy" ] && [ "$react_status" = "healthy" ] && [ "$adminer_status" = "healthy" ]; then
+              echo "Tous les services sont healthy."
+              exit 0
+            fi
+
+            sleep 5
+          done
+
+          echo "Un ou plusieurs services ne sont pas healthy."
+          docker compose logs
+          exit 1
+
+      - name: Vérifier les endpoints réels
+        run: |
+          curl --fail http://localhost:8000/health
+          curl --fail http://localhost:8000/users
+          curl --fail http://localhost:3000
+
+      - name: Installer Node.js pour Cypress
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Installer les dépendances Cypress
+        working-directory: e2e
+        run: npm install
+
+      - name: Exécuter les tests Cypress E2E
+        working-directory: e2e
+        run: npx cypress run --config baseUrl=http://localhost:3000
+
+      - name: Logs Docker en cas d'échec
+        if: failure()
+        run: docker compose logs
+
+      - name: Arrêter la stack
+        if: always()
+        run: docker compose down -v
+
+  publish-images:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: e2e-fullstack
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Préparer les secrets Docker
+        run: |
+          mkdir -p secrets
+          printf '%s' '${{ secrets.MYSQL_ROOT_PASSWORD }}' > secrets/mysql_root_password.txt
+          printf '%s' '${{ secrets.MYSQL_DB }}' > secrets/mysql_database.txt
+          printf '%s' '${{ secrets.MYSQL_USER }}' > secrets/mysql_user.txt
+          printf '%s' '${{ secrets.MYSQL_PASSWORD }}' > secrets/mysql_password.txt
+
       - name: Login Docker Hub
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build MySQL image
-        run: docker build -t my-mysql-test ./mysql
-
-      - name: Build API image
-        run: docker build -t my-fastapi-test ./api
-
-      - name: Create Docker network
-        run: docker network create app-network
-
-      - name: Run MySQL container
+      - name: Build et push des images après succès E2E
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
         run: |
-          docker run -d \
-            --name mysql-container \
-            --network app-network \
-            -e MYSQL_ROOT_PASSWORD=${{ secrets.MYSQL_ROOT_PASSWORD }} \
-            -e MYSQL_DATABASE=${{ secrets.MYSQL_DB }} \
-            -e MYSQL_USER=${{ secrets.MYSQL_USER }} \
-            -e MYSQL_PASSWORD=${{ secrets.MYSQL_PASSWORD }} \
-            my-mysql-test
-
-      - name: Wait for MySQL init
-        run: sleep 25
-
-      - name: Run API container
-        run: |
-          docker run -d \
-            --name api-container \
-            --network app-network \
-            -e MYSQL_HOST=mysql-container \
-            -e MYSQL_USER=${{ secrets.MYSQL_USER }} \
-            -e MYSQL_PASSWORD=${{ secrets.MYSQL_PASSWORD }} \
-            -e MYSQL_DB=${{ secrets.MYSQL_DB }} \
-            -p 8000:8000 \
-            my-fastapi-test
-
-      - name: Wait for API startup
-        run: sleep 10
-
-      - name: Test /users endpoint
-        run: |
-          response=$(curl --silent --show-error --fail http://localhost:8000/users)
-          echo "$response"
-          echo "$response" | grep '"utilisateurs"' >/dev/null
-          echo "$response" | grep -v '"utilisateurs":[[:space:]]*\[\]' >/dev/null
-
-      - name: Tag API image
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: docker tag my-fastapi-test ${{ secrets.DOCKERHUB_USERNAME }}/fastapi-activity:latest
-
-      - name: Push API image
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: docker push ${{ secrets.DOCKERHUB_USERNAME }}/fastapi-activity:latest
+          docker compose build api react
+          docker compose push api react

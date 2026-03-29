@@ -1,0 +1,11 @@
+{
+  "name": "activite3-e2e",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "cy:run": "cypress run"
+  },
+  "devDependencies": {
+    "cypress": "^14.4.0"
+  }
+}
